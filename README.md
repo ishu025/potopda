@@ -91,6 +91,27 @@ server or CORS setup to worry about.
 - Video streaming supports HTTP range requests, so the native `<video>`
   player can seek properly instead of re-downloading the whole file.
 
+## Accounts, likes/dislikes & comments
+
+- **Sign up / log in** from the header (top right). Sessions are stored in an httpOnly cookie (JWT), valid 30 days.
+- Every upload is tied to the account that uploaded it.
+- Anyone logged in can **like or dislike** any file, and **comment** on it (click a card to open the detail view).
+- **Delete rules:** a regular user can only delete their *own* uploads/comments. The fixed **admin** account can delete *anything*.
+- A built-in admin account is created automatically the first time the server starts:
+  - username: `ishu025dec2008`
+  - password: `1234567890ishu2008@dec25`
+
+| Method | Route                       | Description                          |
+|--------|------------------------------|---------------------------------------|
+| POST   | `/api/auth/signup`           | Create an account                     |
+| POST   | `/api/auth/login`             | Log in                                |
+| POST   | `/api/auth/logout`            | Log out                               |
+| GET    | `/api/auth/me`                | Current logged-in user (or null)      |
+| POST   | `/api/files/:id/react`        | `{ type: 'like' \| 'dislike' }`       |
+| GET    | `/api/files/:id/comments`     | List comments on a file               |
+| POST   | `/api/files/:id/comments`     | `{ text }` — add a comment            |
+| DELETE | `/api/comments/:id`           | Delete own comment, or any if admin   |
+
 ## API reference
 
 | Method | Route                  | Description                                   |

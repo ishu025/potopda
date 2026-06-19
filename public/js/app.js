@@ -20,9 +20,21 @@
   const modalClose = document.getElementById('modalClose');
   const modalBody = document.getElementById('modalBody');
 
+  const userArea = document.getElementById('userArea');
+
+  const authModal = document.getElementById('authModal');
+  const authBackdrop = document.getElementById('authBackdrop');
+  const authClose = document.getElementById('authClose');
+  const authTabs = Array.from(document.querySelectorAll('.auth-tab'));
+  const loginForm = document.getElementById('loginForm');
+  const signupForm = document.getElementById('signupForm');
+  const loginError = document.getElementById('loginError');
+  const signupError = document.getElementById('signupError');
+
   const toast = document.getElementById('toast');
 
   const state = { category: 'images' };
+  let currentUser = null;
 
   const ICONS = {
     download:
@@ -30,6 +42,37 @@
     trash:
       '<svg viewBox="0 0 20 20" width="14" height="14"><path d="M4 6h12M8 6V4.5A1 1 0 0 1 9 3.5h2a1 1 0 0 1 1 1V6M6 6l.7 9.1A1.5 1.5 0 0 0 8.2 16.5h3.6a1.5 1.5 0 0 0 1.5-1.4L14 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
+
+  // ------------------------------- helpers -------------------------------
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = bytes;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) {
+      value /= 1024;
+      i += 1;
+    }
+    return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  }
+
+  function formatDate(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  function getExtension(filename) {
+    const parts = String(filename).split('.');
+    if (parts.length < 2) return 'FILE';
+    return parts.pop().slice(0, 4).toUpperCase();
+  }
 
   // ------------------------------- theme -------------------------------
   const THEME_KEY = 'potopda-theme';
@@ -60,6 +103,164 @@
       galleryTitle.textContent = state.category.charAt(0).toUpperCase() + state.category.slice(1);
       loadFiles();
     });
+  });
+
+  // -------------------------------- auth --------------------------------
+  async function fetchMe() {
+    try {
+      const res = await fetch('/api/auth/me');
+      const data = await res.json();
+      currentUser = data.user || null;
+    } catch (e) {
+      currentUser = null;
+    }
+    renderUserArea();
+  }
+
+  function renderUserArea() {
+    userArea.innerHTML = '';
+
+    if (currentUser) {
+      const pill = document.createElement('div');
+      pill.className = 'user-pill';
+
+      const initial = (currentUser.name || '?').trim().charAt(0).toUpperCase();
+      const adminTag = currentUser.role === 'admin' ? ' <span class="admin-tag">ADMIN</span>' : '';
+
+      pill.innerHTML =
+        `<span class="avatar">${escapeHtml(initial)}</span>` +
+        `<span class="full-name">${escapeHtml(currentUser.name)}${adminTag}</span>`;
+
+      const logoutBtn = document.createElement('button');
+      logoutBtn.type = 'button';
+      logoutBtn.className = 'logout-btn';
+      logoutBtn.title = 'Log out';
+      logoutBtn.textContent = '\u2715';
+      logoutBtn.addEventListener('click', handleLogout);
+
+      pill.appendChild(logoutBtn);
+      userArea.appendChild(pill);
+    } else {
+      const loginBtn = document.createElement('button');
+      loginBtn.type = 'button';
+      loginBtn.className = 'btn';
+      loginBtn.textContent = 'Log in';
+      loginBtn.addEventListener('click', () => openAuthModal('login'));
+
+      const signupBtn = document.createElement('button');
+      signupBtn.type = 'button';
+      signupBtn.className = 'btn btn-primary';
+      signupBtn.textContent = 'Sign up';
+      signupBtn.addEventListener('click', () => openAuthModal('signup'));
+
+      userArea.appendChild(loginBtn);
+      userArea.appendChild(signupBtn);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {}
+    currentUser = null;
+    renderUserArea();
+    showToast('Logged out.');
+    loadFiles();
+  }
+
+  function requireLogin() {
+    if (currentUser) return true;
+    showToast('Please log in first.', true);
+    openAuthModal('login');
+    return false;
+  }
+
+  function openAuthModal(mode) {
+    setAuthMode(mode || 'login');
+    authModal.hidden = false;
+  }
+
+  function closeAuthModal() {
+    authModal.hidden = true;
+    loginForm.reset();
+    signupForm.reset();
+    loginError.hidden = true;
+    signupError.hidden = true;
+  }
+
+  function setAuthMode(mode) {
+    authTabs.forEach((t) => t.classList.toggle('is-active', t.dataset.mode === mode));
+    loginForm.hidden = mode !== 'login';
+    signupForm.hidden = mode !== 'signup';
+  }
+
+  authTabs.forEach((t) => t.addEventListener('click', () => setAuthMode(t.dataset.mode)));
+  authBackdrop.addEventListener('click', closeAuthModal);
+  authClose.addEventListener('click', closeAuthModal);
+
+  loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    loginError.hidden = true;
+
+    const username = document.getElementById('loginUsername').value;
+    const password = document.getElementById('loginPassword').value;
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        loginError.textContent = data.message || 'Could not log in.';
+        loginError.hidden = false;
+        return;
+      }
+
+      currentUser = data.user;
+      renderUserArea();
+      closeAuthModal();
+      showToast(`Welcome back, ${currentUser.name}.`);
+      loadFiles();
+    } catch (err) {
+      loginError.textContent = 'Network error. Try again.';
+      loginError.hidden = false;
+    }
+  });
+
+  signupForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    signupError.hidden = true;
+
+    const username = document.getElementById('signupUsername').value;
+    const name = document.getElementById('signupName').value;
+    const password = document.getElementById('signupPassword').value;
+
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, name, password }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        signupError.textContent = data.message || 'Could not create account.';
+        signupError.hidden = false;
+        return;
+      }
+
+      currentUser = data.user;
+      renderUserArea();
+      closeAuthModal();
+      showToast(`Welcome, ${currentUser.name}.`);
+      loadFiles();
+    } catch (err) {
+      signupError.textContent = 'Network error. Try again.';
+      signupError.hidden = false;
+    }
   });
 
   // ----------------------------- data load ------------------------------
@@ -99,6 +300,69 @@
     }
   }
 
+  // ------------------------------ stats row -------------------------------
+  function buildStatsRow(file, className) {
+    const row = document.createElement('div');
+    row.className = className || 'card-stats';
+
+    const likeBtn = document.createElement('button');
+    likeBtn.type = 'button';
+    likeBtn.className = 'stat-btn like' + (file.myReaction === 'like' ? ' is-active' : '');
+    likeBtn.innerHTML = `\u{1F44D} <span>${file.likes}</span>`;
+    likeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const ok = await handleReact(file, 'like');
+      if (ok) loadFiles();
+    });
+
+    const dislikeBtn = document.createElement('button');
+    dislikeBtn.type = 'button';
+    dislikeBtn.className = 'stat-btn dislike' + (file.myReaction === 'dislike' ? ' is-active' : '');
+    dislikeBtn.innerHTML = `\u{1F44E} <span>${file.dislikes}</span>`;
+    dislikeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const ok = await handleReact(file, 'dislike');
+      if (ok) loadFiles();
+    });
+
+    const commentBtn = document.createElement('button');
+    commentBtn.type = 'button';
+    commentBtn.className = 'stat-btn view-comments';
+    commentBtn.innerHTML = `\u{1F4AC} <span>${file.commentCount}</span>`;
+    commentBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openDetail(file);
+    });
+
+    row.appendChild(likeBtn);
+    row.appendChild(dislikeBtn);
+    row.appendChild(commentBtn);
+    return row;
+  }
+
+  async function handleReact(file, type) {
+    if (!requireLogin()) return false;
+    try {
+      const res = await fetch(`/api/files/${file.id}/react`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.message || 'Could not react.', true);
+        return false;
+      }
+      file.likes = data.likes;
+      file.dislikes = data.dislikes;
+      file.myReaction = data.myReaction;
+      return true;
+    } catch (e) {
+      showToast('Could not react.', true);
+      return false;
+    }
+  }
+
   // ------------------------------ builders -------------------------------
   function buildMediaCard(file) {
     const card = document.createElement('div');
@@ -111,7 +375,7 @@
       media.alt = file.filename;
       media.loading = 'lazy';
       media.className = 'card-media';
-      media.addEventListener('click', () => openLightbox(file));
+      media.addEventListener('click', () => openDetail(file));
     } else {
       media = document.createElement('video');
       media.src = `/api/stream/${file.id}`;
@@ -128,16 +392,24 @@
     name.className = 'name';
     name.textContent = file.filename;
     name.title = file.filename;
+    name.style.cursor = 'pointer';
+    name.addEventListener('click', () => openDetail(file));
     foot.appendChild(name);
     foot.appendChild(buildActions(file));
 
     card.appendChild(foot);
+    card.appendChild(buildStatsRow(file, 'card-stats'));
     return card;
   }
 
   function buildFileRow(file) {
     const row = document.createElement('div');
     row.className = 'file-row';
+    row.style.cursor = 'pointer';
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.icon-btn')) return;
+      openDetail(file);
+    });
 
     const badge = document.createElement('div');
     badge.className = 'file-badge';
@@ -158,6 +430,7 @@
 
     info.appendChild(name);
     info.appendChild(meta);
+    info.appendChild(buildStatsRow(file, 'file-stats'));
     row.appendChild(info);
     row.appendChild(buildActions(file));
 
@@ -171,12 +444,14 @@
     const downloadBtn = iconButton(ICONS.download, 'Download', () => {
       window.location.href = `/api/download/${file.id}`;
     });
-
-    const deleteBtn = iconButton(ICONS.trash, 'Delete', () => handleDelete(file));
-    deleteBtn.classList.add('danger');
-
     wrap.appendChild(downloadBtn);
-    wrap.appendChild(deleteBtn);
+
+    if (file.canDelete) {
+      const deleteBtn = iconButton(ICONS.trash, 'Delete', () => handleDelete(file, false));
+      deleteBtn.classList.add('danger');
+      wrap.appendChild(deleteBtn);
+    }
+
     return wrap;
   }
 
@@ -193,14 +468,19 @@
     return btn;
   }
 
-  async function handleDelete(file) {
+  async function handleDelete(file, fromDetail) {
     const ok = window.confirm(`Delete "${file.filename}"? This can't be undone.`);
     if (!ok) return;
 
     try {
       const res = await fetch(`/api/files/${file.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('delete failed');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.message || 'Could not delete that file.', true);
+        return;
+      }
       showToast('File deleted.');
+      if (fromDetail) closeModal();
       loadFiles();
     } catch (err) {
       console.error(err);
@@ -208,26 +488,227 @@
     }
   }
 
-  // ------------------------------- lightbox -------------------------------
-  function openLightbox(file) {
-    modalBody.innerHTML = '';
-    const img = document.createElement('img');
-    img.src = `/api/stream/${file.id}`;
-    img.alt = file.filename;
-    modalBody.appendChild(img);
-    modal.hidden = false;
-  }
-
-  function closeLightbox() {
+  // ------------------------------- detail view -------------------------------
+  function closeModal() {
     modal.hidden = true;
     modalBody.innerHTML = '';
   }
 
-  modalBackdrop.addEventListener('click', closeLightbox);
-  modalClose.addEventListener('click', closeLightbox);
+  modalBackdrop.addEventListener('click', closeModal);
+  modalClose.addEventListener('click', closeModal);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !modal.hidden) closeLightbox();
+    if (e.key === 'Escape') {
+      if (!modal.hidden) closeModal();
+      if (!authModal.hidden) closeAuthModal();
+    }
   });
+
+  async function openDetail(file) {
+    modal.hidden = false;
+    modalBody.innerHTML = '<p class="loading-state">Loading\u2026</p>';
+    await renderDetail(file);
+  }
+
+  async function renderDetail(file) {
+    let comments = [];
+    try {
+      const res = await fetch(`/api/files/${file.id}/comments`);
+      comments = await res.json();
+    } catch (e) {}
+
+    modalBody.innerHTML = '';
+
+    const detail = document.createElement('div');
+    detail.className = 'detail';
+
+    const mediaWrap = document.createElement('div');
+    mediaWrap.className = 'detail-media' + (file.category === 'files' ? ' is-file' : '');
+
+    if (file.category === 'images') {
+      const img = document.createElement('img');
+      img.src = `/api/stream/${file.id}`;
+      img.alt = file.filename;
+      mediaWrap.appendChild(img);
+    } else if (file.category === 'videos') {
+      const vid = document.createElement('video');
+      vid.src = `/api/stream/${file.id}`;
+      vid.controls = true;
+      mediaWrap.appendChild(vid);
+    } else {
+      mediaWrap.textContent = getExtension(file.filename);
+    }
+    detail.appendChild(mediaWrap);
+
+    const body = document.createElement('div');
+    body.className = 'detail-body';
+
+    const head = document.createElement('div');
+    head.className = 'detail-head';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'name';
+    nameEl.textContent = file.filename;
+    head.appendChild(nameEl);
+
+    if (file.canDelete) {
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'detail-delete';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', () => handleDelete(file, true));
+      head.appendChild(delBtn);
+    }
+    body.appendChild(head);
+
+    const byline = document.createElement('p');
+    byline.className = 'detail-by';
+    const ownerText = file.uploadedBy ? `Uploaded by ${file.uploadedBy.name} \u00B7 ` : '';
+    byline.textContent = `${ownerText}${formatBytes(file.size)} \u00B7 ${formatDate(file.uploadDate)}`;
+    body.appendChild(byline);
+
+    const reactions = document.createElement('div');
+    reactions.className = 'detail-reactions';
+
+    const likeBtn = document.createElement('button');
+    likeBtn.type = 'button';
+    likeBtn.className = 'react-btn like' + (file.myReaction === 'like' ? ' is-active' : '');
+    likeBtn.innerHTML = `\u{1F44D} <span>${file.likes}</span>`;
+    likeBtn.addEventListener('click', async () => {
+      const ok = await handleReact(file, 'like');
+      if (ok) { renderDetail(file); loadFiles(); }
+    });
+
+    const dislikeBtn = document.createElement('button');
+    dislikeBtn.type = 'button';
+    dislikeBtn.className = 'react-btn dislike' + (file.myReaction === 'dislike' ? ' is-active' : '');
+    dislikeBtn.innerHTML = `\u{1F44E} <span>${file.dislikes}</span>`;
+    dislikeBtn.addEventListener('click', async () => {
+      const ok = await handleReact(file, 'dislike');
+      if (ok) { renderDetail(file); loadFiles(); }
+    });
+
+    reactions.appendChild(likeBtn);
+    reactions.appendChild(dislikeBtn);
+    body.appendChild(reactions);
+
+    const commentsSection = document.createElement('div');
+    commentsSection.className = 'detail-comments';
+
+    const h3 = document.createElement('h3');
+    h3.textContent = `Comments (${comments.length})`;
+    commentsSection.appendChild(h3);
+
+    const list = document.createElement('div');
+    list.className = 'comments-list';
+
+    if (!comments.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty-comments';
+      empty.textContent = 'No comments yet.';
+      list.appendChild(empty);
+    } else {
+      comments.forEach((c) => list.appendChild(buildCommentItem(c, file)));
+    }
+    commentsSection.appendChild(list);
+
+    if (currentUser) {
+      const form = document.createElement('form');
+      form.className = 'comment-form';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Add a comment\u2026';
+      input.maxLength = 1000;
+
+      const submitBtn = document.createElement('button');
+      submitBtn.type = 'submit';
+      submitBtn.textContent = 'Post';
+
+      form.appendChild(input);
+      form.appendChild(submitBtn);
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+
+        try {
+          const res = await fetch(`/api/files/${file.id}/comments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            showToast(data.message || 'Could not post comment.', true);
+            return;
+          }
+          file.commentCount += 1;
+          renderDetail(file);
+          loadFiles();
+        } catch (err) {
+          showToast('Could not post comment.', true);
+        }
+      });
+
+      commentsSection.appendChild(form);
+    } else {
+      const hint = document.createElement('p');
+      hint.className = 'login-hint';
+      hint.textContent = 'Log in to comment.';
+      commentsSection.appendChild(hint);
+    }
+
+    body.appendChild(commentsSection);
+    detail.appendChild(body);
+    modalBody.appendChild(detail);
+  }
+
+  function buildCommentItem(c, file) {
+    const item = document.createElement('div');
+    item.className = 'comment-item';
+
+    const meta = document.createElement('div');
+    meta.className = 'comment-meta';
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = c.name;
+
+    const date = document.createElement('span');
+    date.className = 'date';
+    date.textContent = formatDate(c.createdAt);
+
+    meta.appendChild(name);
+    meta.appendChild(date);
+
+    if (c.canDelete) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'comment-del';
+      del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        try {
+          const res = await fetch(`/api/comments/${c.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('failed');
+          file.commentCount = Math.max(0, file.commentCount - 1);
+          renderDetail(file);
+          loadFiles();
+        } catch (e) {
+          showToast('Could not delete comment.', true);
+        }
+      });
+      meta.appendChild(del);
+    }
+
+    const text = document.createElement('p');
+    text.className = 'comment-text';
+    text.textContent = c.text;
+
+    item.appendChild(meta);
+    item.appendChild(text);
+    return item;
+  }
 
   // -------------------------------- uploads --------------------------------
   ['dragenter', 'dragover'].forEach((evt) => {
@@ -245,11 +726,16 @@
   });
 
   dropzone.addEventListener('drop', (e) => {
+    if (!requireLogin()) return;
     const files = e.dataTransfer ? e.dataTransfer.files : null;
     if (files && files.length) queueUploads(files);
   });
 
-  browseBtn.addEventListener('click', () => fileInput.click());
+  browseBtn.addEventListener('click', () => {
+    if (!requireLogin()) return;
+    fileInput.click();
+  });
+
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) queueUploads(fileInput.files);
     fileInput.value = '';
@@ -350,31 +836,9 @@
     }, 2800);
   }
 
-  // -------------------------------- helpers --------------------------------
-  function formatBytes(bytes) {
-    if (!bytes) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let value = bytes;
-    let i = 0;
-    while (value >= 1024 && i < units.length - 1) {
-      value /= 1024;
-      i += 1;
-    }
-    return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-  }
-
-  function formatDate(iso) {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-  }
-
-  function getExtension(filename) {
-    const parts = String(filename).split('.');
-    if (parts.length < 2) return 'FILE';
-    return parts.pop().slice(0, 4).toUpperCase();
-  }
-
   // --------------------------------- init ---------------------------------
-  loadFiles();
+  (async function init() {
+    await fetchMe();
+    await loadFiles();
+  })();
 })();
