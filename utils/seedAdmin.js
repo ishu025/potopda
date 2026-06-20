@@ -2,8 +2,8 @@ const User = require('../models/User');
 const { hashPassword } = require('./auth');
 
 const ADMIN_USERNAME = 'ishu025dec2008';
-const ADMIN_NAME = 'Ishu :admin';
-const ADMIN_PASSWORD = '1234567890ishu2008@dec25';
+const ADMIN_NAME = 'Ishu: Admin';
+const ADMIN_PASSWORD = '1234567890ishu2008@dec';
 
 async function seedAdmin() {
   const existing = await User.findOne({ username: ADMIN_USERNAME });
