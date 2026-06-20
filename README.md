@@ -127,6 +127,11 @@ Then open **http://localhost:5000**.
   to it. **Documents** (which can't be compressed) are rejected up front if
   they're over `MAX_UPLOAD_SIZE_KB` (500KB by default), with a clear error
   explaining why. Videos are rejected outright with a clear error message.
+- **Images are compressed twice:** first in the browser (Canvas API, before
+  the upload request is even sent — smaller upload, faster on slow
+  connections), then again on the server with Sharp as the authoritative
+  pass. If browser-side compression fails for any reason (old browser,
+  unusual file), the original is just sent as-is and the server handles it.
 - **Images** are re-compressed with Sharp before upload:
   - **Profile photos** are resized to a 500×500 square and compressed
     starting at **50% quality** — they're only ever shown as a small
