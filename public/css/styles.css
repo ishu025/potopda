@@ -319,7 +319,7 @@ button { font-family: inherit; }
   gap: 8px;
 }
 
-/* card: shared chrome for image + video tiles */
+/* card: shared chrome for image tiles */
 
 .card {
   position: relative;
@@ -343,12 +343,6 @@ button { font-family: inherit; }
   object-fit: cover;
   background: var(--surface-2);
   cursor: zoom-in;
-}
-
-.card video.card-media {
-  cursor: default;
-  object-fit: contain;
-  background: #000;
 }
 
 .card-foot {
@@ -488,7 +482,7 @@ button { font-family: inherit; }
   z-index: 1;
 }
 
-.modal-body img, .modal-body video {
+.modal-body img {
   max-width: 100%;
   max-height: 80vh;
   border-radius: var(--radius-md);
@@ -577,6 +571,31 @@ button { font-family: inherit; }
   font-size: 13px;
 }
 
+.avatar-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.avatar-btn:hover .avatar { opacity: 0.85; }
+
+.avatar-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--surface-2);
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+
+.avatar-btn:hover::after,
+.avatar-btn:focus-visible::after { opacity: 1; }
+
 .user-pill .avatar {
   width: 22px;
   height: 22px;
@@ -589,6 +608,7 @@ button { font-family: inherit; }
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  object-fit: cover;
 }
 
 .user-pill .admin-tag {
@@ -753,7 +773,7 @@ button { font-family: inherit; }
   overflow: hidden;
 }
 
-.detail-media img, .detail-media video { max-width: 100%; max-height: 50vh; display: block; }
+.detail-media img { max-width: 100%; max-height: 50vh; display: block; }
 
 .detail-media.is-file {
   background: var(--accent-soft);

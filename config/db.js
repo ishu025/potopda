@@ -1,11 +1,11 @@
 const mongoose = require('mongoose');
 
-let bucket = null;
-
 /**
- * Connects to MongoDB and initializes a GridFS bucket.
- * GridFS stores every uploaded file (image, video, or document) directly
- * inside MongoDB, split into chunks, alongside its metadata.
+ * Connects to MongoDB. Binary file data no longer lives here — GridFS has
+ * been removed in favor of Cloudinary, so all this database now holds is
+ * lightweight metadata (filenames, Cloudinary URLs, users, comments,
+ * reactions). That's the fix for the 512MB free-tier ceiling: a few
+ * thousand metadata documents are kilobytes, not gigabytes.
  */
 async function connectDB() {
   const uri = process.env.MONGODB_URI;
@@ -16,22 +16,8 @@ async function connectDB() {
 
   const conn = await mongoose.connect(uri);
 
-  bucket = new mongoose.mongo.GridFSBucket(conn.connection.db, {
-    bucketName: 'uploads',
-  });
-
   console.log(`MongoDB connected -> ${conn.connection.host}/${conn.connection.name}`);
   return conn;
 }
 
-/**
- * Returns the active GridFS bucket. Throws if called before connectDB().
- */
-function getBucket() {
-  if (!bucket) {
-    throw new Error('GridFS bucket not ready yet — connectDB() must resolve first.');
-  }
-  return bucket;
-}
-
-module.exports = { connectDB, getBucket };
+module.exports = { connectDB };

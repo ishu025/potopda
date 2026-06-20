@@ -124,12 +124,27 @@
       const pill = document.createElement('div');
       pill.className = 'user-pill';
 
-      const initial = (currentUser.name || '?').trim().charAt(0).toUpperCase();
-      const adminTag = currentUser.role === 'admin' ? ' <span class="admin-tag">ADMIN</span>' : '';
+      const avatarBtn = document.createElement('button');
+      avatarBtn.type = 'button';
+      avatarBtn.className = 'avatar-btn';
+      avatarBtn.title = 'Change profile photo';
+      avatarBtn.appendChild(buildAvatarEl(currentUser));
 
-      pill.innerHTML =
-        `<span class="avatar">${escapeHtml(initial)}</span>` +
-        `<span class="full-name">${escapeHtml(currentUser.name)}${adminTag}</span>`;
+      const avatarInput = document.createElement('input');
+      avatarInput.type = 'file';
+      avatarInput.accept = 'image/*';
+      avatarInput.hidden = true;
+      avatarInput.addEventListener('change', () => {
+        if (avatarInput.files.length) uploadAvatar(avatarInput.files[0]);
+        avatarInput.value = '';
+      });
+
+      avatarBtn.addEventListener('click', () => avatarInput.click());
+
+      const adminTag = currentUser.role === 'admin' ? ' <span class="admin-tag">ADMIN</span>' : '';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'full-name';
+      nameEl.innerHTML = `${escapeHtml(currentUser.name)}${adminTag}`;
 
       const logoutBtn = document.createElement('button');
       logoutBtn.type = 'button';
@@ -138,6 +153,9 @@
       logoutBtn.textContent = '\u2715';
       logoutBtn.addEventListener('click', handleLogout);
 
+      pill.appendChild(avatarBtn);
+      pill.appendChild(avatarInput);
+      pill.appendChild(nameEl);
       pill.appendChild(logoutBtn);
       userArea.appendChild(pill);
     } else {
@@ -155,6 +173,41 @@
 
       userArea.appendChild(loginBtn);
       userArea.appendChild(signupBtn);
+    }
+  }
+
+  function buildAvatarEl(user) {
+    if (user.avatarUrl) {
+      const img = document.createElement('img');
+      img.src = user.avatarUrl;
+      img.alt = '';
+      img.className = 'avatar';
+      return img;
+    }
+    const span = document.createElement('span');
+    span.className = 'avatar';
+    span.textContent = (user.name || '?').trim().charAt(0).toUpperCase();
+    return span;
+  }
+
+  async function uploadAvatar(file) {
+    const formData = new FormData();
+    formData.append('avatar', file);
+
+    try {
+      const res = await fetch('/api/auth/avatar', { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        showToast(data.message || 'Could not update your profile photo.', true);
+        return;
+      }
+
+      currentUser = data.user;
+      renderUserArea();
+      showToast(data.message || 'Profile photo updated.');
+    } catch (err) {
+      showToast('Could not update your profile photo \u2014 check your connection.', true);
     }
   }
 
@@ -368,21 +421,12 @@
     const card = document.createElement('div');
     card.className = 'card';
 
-    let media;
-    if (file.category === 'images') {
-      media = document.createElement('img');
-      media.src = `/api/stream/${file.id}`;
-      media.alt = file.filename;
-      media.loading = 'lazy';
-      media.className = 'card-media';
-      media.addEventListener('click', () => openDetail(file));
-    } else {
-      media = document.createElement('video');
-      media.src = `/api/stream/${file.id}`;
-      media.controls = true;
-      media.preload = 'metadata';
-      media.className = 'card-media';
-    }
+    const media = document.createElement('img');
+    media.src = file.url;
+    media.alt = file.filename;
+    media.loading = 'lazy';
+    media.className = 'card-media';
+    media.addEventListener('click', () => openDetail(file));
     card.appendChild(media);
 
     const foot = document.createElement('div');
@@ -526,14 +570,9 @@
 
     if (file.category === 'images') {
       const img = document.createElement('img');
-      img.src = `/api/stream/${file.id}`;
+      img.src = file.url;
       img.alt = file.filename;
       mediaWrap.appendChild(img);
-    } else if (file.category === 'videos') {
-      const vid = document.createElement('video');
-      vid.src = `/api/stream/${file.id}`;
-      vid.controls = true;
-      mediaWrap.appendChild(vid);
     } else {
       mediaWrap.textContent = getExtension(file.filename);
     }
@@ -791,6 +830,8 @@
 
         let payload = null;
         try { payload = JSON.parse(xhr.responseText); } catch (e) {}
+
+        if (payload && payload.message) showToast(payload.message);
 
         if (payload && payload.file && payload.file.category === state.category) {
           loadFiles();

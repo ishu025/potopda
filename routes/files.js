@@ -2,15 +2,17 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const upload = require('../middleware/multer');
-const { getBucket } = require('../config/db');
-const { getCategory } = require('../utils/category');
+const { uploadBuffer, destroyAsset, downloadUrl } = require('../config/cloudinary');
+const { compressPostImage } = require('../utils/imageCompress');
+const { getCategory, isVideo } = require('../utils/category');
 const { requireAuth } = require('../middleware/auth');
+const File = require('../models/File');
 const Reaction = require('../models/Reaction');
 const Comment = require('../models/Comment');
 
 const router = express.Router();
 
-const VALID_CATEGORIES = ['images', 'videos', 'files', 'all'];
+const VALID_CATEGORIES = ['images', 'files', 'all'];
 
 function toObjectId(id) {
   if (!mongoose.Types.ObjectId.isValid(id)) return null;
@@ -25,78 +27,136 @@ function toCountMap(aggResult) {
   return map;
 }
 
+function formatFile(doc, extras) {
+  return {
+    id: doc._id,
+    filename: doc.filename,
+    size: doc.size,
+    contentType: doc.contentType,
+    category: doc.category,
+    url: doc.url,
+    uploadDate: doc.uploadDate,
+    uploadedBy: doc.uploadedBy || null,
+    ...extras,
+  };
+}
+
+function formatKb(bytes) {
+  return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+}
+
 // ---------------------------------------------------------------------
-// POST /api/upload — accepts one file under the "file" field
+// POST /api/upload — accepts one file under the "file" field.
+// Images are compressed with Sharp before being sent to Cloudinary;
+// everything else (PDFs, zips, etc.) goes up as-is. Videos are rejected.
 // ---------------------------------------------------------------------
 router.post('/upload', requireAuth, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) {
-      const tooLarge = err.code === 'LIMIT_FILE_SIZE';
-      return res.status(tooLarge ? 413 : 400).json({
-        message: tooLarge ? 'File is larger than the allowed limit.' : 'Upload failed.',
-      });
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          message: `That file is larger than the ${upload.maxSizeKb}KB upload limit. Please choose a smaller file and try again.`,
+        });
+      }
+      console.error('Multer error:', err.message);
+      return res.status(400).json({ message: 'Upload failed — please pick a single file and try again.' });
     }
 
     if (!req.file) {
-      return res.status(400).json({ message: 'No file was received.' });
+      return res.status(400).json({ message: 'No file was selected. Choose a file before uploading.' });
     }
 
+    if (isVideo(req.file.mimetype)) {
+      return res.status(415).json({
+        message: 'Video uploads are no longer supported here — please upload an image or a document instead.',
+      });
+    }
+
+    const category = getCategory(req.file.mimetype);
+
     try {
-      const bucket = getBucket();
-      const category = getCategory(req.file.mimetype);
+      let bufferToUpload = req.file.buffer;
+      let contentType = req.file.mimetype || 'application/octet-stream';
+      let resourceType = 'raw';
+      let folder = 'potopda/files';
 
-      const uploadStream = bucket.openUploadStream(req.file.originalname, {
-        contentType: req.file.mimetype || 'application/octet-stream',
-        metadata: {
-          category,
-          uploadedBy: { id: req.user.id, username: req.user.username, name: req.user.name },
-        },
-      });
-
-      uploadStream.on('error', (streamErr) => {
-        console.error('GridFS upload stream error:', streamErr);
-        if (!res.headersSent) {
-          res.status(500).json({ message: 'Could not save file to the database.' });
+      if (category === 'images') {
+        resourceType = 'image';
+        folder = 'potopda/images';
+        contentType = 'image/jpeg';
+        try {
+          bufferToUpload = await compressPostImage(req.file.buffer);
+        } catch (compressErr) {
+          console.error('Sharp compression error:', compressErr.message);
+          return res.status(422).json({
+            message: 'That image could not be processed. Try a different file (JPEG, PNG, or WebP work best).',
+          });
         }
-      });
+      }
 
-      uploadStream.on('finish', () => {
-        res.status(201).json({
-          message: 'Upload complete.',
-          file: {
-            id: uploadStream.id,
-            filename: req.file.originalname,
-            category,
-            size: req.file.size,
-            contentType: req.file.mimetype,
-            uploadDate: new Date(),
-          },
+      let result;
+      try {
+        result = await uploadBuffer(bufferToUpload, {
+          folder,
+          resourceType,
+          filename: req.file.originalname,
         });
-      });
+      } catch (cloudErr) {
+        console.error('Cloudinary upload error:', cloudErr.message);
+        const configIssue = /not configured/i.test(cloudErr.message);
+        return res.status(configIssue ? 500 : 502).json({
+          message: configIssue
+            ? 'Image storage is not configured on the server yet. Set the Cloudinary keys in .env and restart.'
+            : 'Could not upload to cloud storage right now. Please try again in a moment.',
+        });
+      }
 
-      uploadStream.end(req.file.buffer);
+      let fileDoc;
+      try {
+        fileDoc = await File.create({
+          filename: req.file.originalname,
+          category,
+          contentType,
+          size: bufferToUpload.length,
+          originalSize: req.file.size,
+          url: result.secure_url,
+          cloudinaryId: result.public_id,
+          resourceType,
+          uploadedBy: { id: req.user.id, username: req.user.username, name: req.user.name },
+        });
+      } catch (dbErr) {
+        console.error('Could not save file metadata:', dbErr.message);
+        await destroyAsset(result.public_id, resourceType);
+        return res.status(500).json({ message: 'Upload was processed but saving its details failed. Please try again.' });
+      }
+
+      res.status(201).json({
+        message:
+          category === 'images'
+            ? `Upload complete — compressed from ${formatKb(req.file.size)} to ${formatKb(bufferToUpload.length)}.`
+            : 'Upload complete.',
+        file: formatFile(fileDoc, { likes: 0, dislikes: 0, commentCount: 0, myReaction: null, canDelete: true }),
+      });
     } catch (e) {
-      console.error(e);
-      res.status(500).json({ message: 'Server error during upload.' });
+      console.error('Unexpected upload error:', e);
+      res.status(500).json({ message: 'Something went wrong while uploading. Please try again.' });
     }
   });
 });
 
 // ---------------------------------------------------------------------
-// GET /api/files/:category — list metadata for images | videos | files | all
+// GET /api/files/:category — list metadata for images | files | all
 // ---------------------------------------------------------------------
 router.get('/files/:category', async (req, res) => {
   const { category } = req.params;
 
   if (!VALID_CATEGORIES.includes(category)) {
-    return res.status(400).json({ message: 'Unknown category.' });
+    return res.status(400).json({ message: `Unknown category "${category}". Use images, files, or all.` });
   }
 
   try {
-    const bucket = getBucket();
-    const filter = category === 'all' ? {} : { 'metadata.category': category };
-
-    const docs = await bucket.find(filter, { sort: { uploadDate: -1 } }).toArray();
+    const filter = category === 'all' ? {} : { category };
+    const docs = await File.find(filter).sort({ uploadDate: -1 });
     const ids = docs.map((d) => d._id);
 
     const [likeAgg, dislikeAgg, commentAgg, myReactions] = await Promise.all([
@@ -116,102 +176,44 @@ router.get('/files/:category', async (req, res) => {
     });
 
     const files = docs.map((doc) => {
-      const owner = doc.metadata && doc.metadata.uploadedBy;
+      const owner = doc.uploadedBy;
       const isOwner = Boolean(req.user && owner && owner.id === req.user.id);
       const isAdmin = Boolean(req.user && req.user.role === 'admin');
 
-      return {
-        id: doc._id,
-        filename: doc.filename,
-        size: doc.length,
-        contentType: doc.contentType,
-        category: (doc.metadata && doc.metadata.category) || 'files',
-        uploadDate: doc.uploadDate,
-        uploadedBy: owner || null,
+      return formatFile(doc, {
         likes: likeMap[doc._id.toString()] || 0,
         dislikes: dislikeMap[doc._id.toString()] || 0,
         commentCount: commentMap[doc._id.toString()] || 0,
         myReaction: myReactionMap[doc._id.toString()] || null,
         canDelete: isOwner || isAdmin,
-      };
+      });
     });
 
     res.json(files);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not load files.' });
+    console.error('Could not load files:', e);
+    res.status(500).json({ message: 'Could not load your files right now. Please refresh and try again.' });
   }
 });
 
 // ---------------------------------------------------------------------
-// GET /api/stream/:id — inline playback/preview, range-aware (for video seeking)
-// ---------------------------------------------------------------------
-router.get('/stream/:id', async (req, res) => {
-  const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
-
-  try {
-    const bucket = getBucket();
-    const docs = await bucket.find({ _id: id }).toArray();
-    if (!docs.length) return res.status(404).json({ message: 'File not found.' });
-
-    const file = docs[0];
-    const range = req.headers.range;
-
-    res.set('Content-Type', file.contentType || 'application/octet-stream');
-    res.set('Accept-Ranges', 'bytes');
-    res.set('Cache-Control', 'public, max-age=31536000, immutable');
-
-    if (range) {
-      const match = /bytes=(\d*)-(\d*)/.exec(range);
-      const start = match && match[1] ? parseInt(match[1], 10) : 0;
-      const end = match && match[2] ? parseInt(match[2], 10) : file.length - 1;
-      const safeEnd = Math.min(end, file.length - 1);
-
-      res.status(206);
-      res.set('Content-Range', `bytes ${start}-${safeEnd}/${file.length}`);
-      res.set('Content-Length', safeEnd - start + 1);
-
-      bucket
-        .openDownloadStream(id, { start, end: safeEnd + 1 })
-        .on('error', () => res.end())
-        .pipe(res);
-    } else {
-      res.set('Content-Length', file.length);
-      bucket
-        .openDownloadStream(id)
-        .on('error', () => res.end())
-        .pipe(res);
-    }
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not stream file.' });
-  }
-});
-
-// ---------------------------------------------------------------------
-// GET /api/download/:id — force a file download with its original name
+// GET /api/download/:id — redirect to a Cloudinary URL that forces a
+// download with the original filename. Bytes are served straight from
+// Cloudinary's CDN, not proxied through this server.
 // ---------------------------------------------------------------------
 router.get('/download/:id', async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
+  if (!id) return res.status(400).json({ message: 'That download link looks invalid.' });
 
   try {
-    const bucket = getBucket();
-    const docs = await bucket.find({ _id: id }).toArray();
-    if (!docs.length) return res.status(404).json({ message: 'File not found.' });
+    const doc = await File.findById(id);
+    if (!doc) return res.status(404).json({ message: 'File not found — it may have been deleted.' });
 
-    const file = docs[0];
-    res.set('Content-Type', file.contentType || 'application/octet-stream');
-    res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(file.filename)}"`);
-
-    bucket
-      .openDownloadStream(id)
-      .on('error', () => res.end())
-      .pipe(res);
+    const url = downloadUrl(doc.cloudinaryId, doc.resourceType, doc.filename);
+    res.redirect(url);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not download file.' });
+    console.error('Could not build download link:', e);
+    res.status(500).json({ message: 'Could not start the download. Please try again.' });
   }
 });
 
@@ -220,28 +222,27 @@ router.get('/download/:id', async (req, res) => {
 // ---------------------------------------------------------------------
 router.delete('/files/:id', requireAuth, async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
+  if (!id) return res.status(400).json({ message: 'That file link looks invalid.' });
 
   try {
-    const bucket = getBucket();
-    const docs = await bucket.find({ _id: id }).toArray();
-    if (!docs.length) return res.status(404).json({ message: 'File not found.' });
+    const doc = await File.findById(id);
+    if (!doc) return res.status(404).json({ message: 'File not found — it may already be deleted.' });
 
-    const owner = docs[0].metadata && docs[0].metadata.uploadedBy;
+    const owner = doc.uploadedBy;
     const isOwner = Boolean(owner && owner.id === req.user.id);
     const isAdmin = req.user.role === 'admin';
 
     if (!isOwner && !isAdmin) {
-      return res.status(403).json({ message: 'You can only delete your own uploads.' });
+      return res.status(403).json({ message: 'You can only delete files you uploaded yourself.' });
     }
 
-    await bucket.delete(id);
-    await Promise.all([Reaction.deleteMany({ fileId: id }), Comment.deleteMany({ fileId: id })]);
+    await destroyAsset(doc.cloudinaryId, doc.resourceType);
+    await Promise.all([doc.deleteOne(), Reaction.deleteMany({ fileId: id }), Comment.deleteMany({ fileId: id })]);
 
     res.json({ message: 'File deleted.' });
   } catch (e) {
-    console.error(e);
-    res.status(404).json({ message: 'File not found or already deleted.' });
+    console.error('Could not delete file:', e);
+    res.status(500).json({ message: 'Could not delete that file. Please try again.' });
   }
 });
 
@@ -250,14 +251,17 @@ router.delete('/files/:id', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------
 router.post('/files/:id/react', requireAuth, async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
+  if (!id) return res.status(400).json({ message: 'That file link looks invalid.' });
 
   const { type } = req.body || {};
   if (!['like', 'dislike'].includes(type)) {
-    return res.status(400).json({ message: 'Reaction must be like or dislike.' });
+    return res.status(400).json({ message: 'Reaction must be either "like" or "dislike".' });
   }
 
   try {
+    const exists = await File.exists({ _id: id });
+    if (!exists) return res.status(404).json({ message: 'File not found — it may have been deleted.' });
+
     const existing = await Reaction.findOne({ fileId: id, userId: req.user.id });
 
     if (existing && existing.type === type) {
@@ -277,8 +281,8 @@ router.post('/files/:id/react', requireAuth, async (req, res) => {
 
     res.json({ likes, dislikes, myReaction: fresh ? fresh.type : null });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not save reaction.' });
+    console.error('Could not save reaction:', e);
+    res.status(500).json({ message: 'Could not save your reaction. Please try again.' });
   }
 });
 
@@ -287,7 +291,7 @@ router.post('/files/:id/react', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------
 router.get('/files/:id/comments', async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
+  if (!id) return res.status(400).json({ message: 'That file link looks invalid.' });
 
   try {
     const comments = await Comment.find({ fileId: id }).sort({ createdAt: 1 });
@@ -301,8 +305,8 @@ router.get('/files/:id/comments', async (req, res) => {
     }));
     res.json(list);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not load comments.' });
+    console.error('Could not load comments:', e);
+    res.status(500).json({ message: 'Could not load comments right now. Please try again.' });
   }
 });
 
@@ -311,13 +315,16 @@ router.get('/files/:id/comments', async (req, res) => {
 // ---------------------------------------------------------------------
 router.post('/files/:id/comments', requireAuth, async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid file id.' });
+  if (!id) return res.status(400).json({ message: 'That file link looks invalid.' });
 
   const text = String((req.body && req.body.text) || '').trim();
   if (!text) return res.status(400).json({ message: 'Comment cannot be empty.' });
-  if (text.length > 1000) return res.status(400).json({ message: 'Comment is too long.' });
+  if (text.length > 1000) return res.status(400).json({ message: 'Comment is too long (max 1000 characters).' });
 
   try {
+    const exists = await File.exists({ _id: id });
+    if (!exists) return res.status(404).json({ message: 'File not found — it may have been deleted.' });
+
     const comment = await Comment.create({
       fileId: id,
       userId: req.user.id,
@@ -335,8 +342,8 @@ router.post('/files/:id/comments', requireAuth, async (req, res) => {
       canDelete: true,
     });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not post comment.' });
+    console.error('Could not post comment:', e);
+    res.status(500).json({ message: 'Could not post your comment. Please try again.' });
   }
 });
 
@@ -345,11 +352,11 @@ router.post('/files/:id/comments', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------
 router.delete('/comments/:id', requireAuth, async (req, res) => {
   const id = toObjectId(req.params.id);
-  if (!id) return res.status(400).json({ message: 'Invalid comment id.' });
+  if (!id) return res.status(400).json({ message: 'That comment link looks invalid.' });
 
   try {
     const comment = await Comment.findById(id);
-    if (!comment) return res.status(404).json({ message: 'Comment not found.' });
+    if (!comment) return res.status(404).json({ message: 'Comment not found — it may already be deleted.' });
 
     const isOwner = comment.userId.toString() === req.user.id;
     const isAdmin = req.user.role === 'admin';
@@ -360,8 +367,8 @@ router.delete('/comments/:id', requireAuth, async (req, res) => {
     await comment.deleteOne();
     res.json({ message: 'Comment deleted.' });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: 'Could not delete comment.' });
+    console.error('Could not delete comment:', e);
+    res.status(500).json({ message: 'Could not delete that comment. Please try again.' });
   }
 });
 

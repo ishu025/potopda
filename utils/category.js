@@ -1,12 +1,16 @@
 /**
- * Maps a MIME type to one of potopda's three sections.
- * Anything that isn't an image or a video falls into "files".
+ * Maps a MIME type to one of potopda's sections. Video support has been
+ * removed (see isVideo below, used by the upload route to reject videos
+ * with a clear message rather than silently accepting them).
  */
 function getCategory(mimetype) {
   if (typeof mimetype !== 'string') return 'files';
   if (mimetype.startsWith('image/')) return 'images';
-  if (mimetype.startsWith('video/')) return 'videos';
   return 'files';
 }
 
-module.exports = { getCategory };
+function isVideo(mimetype) {
+  return typeof mimetype === 'string' && mimetype.startsWith('video/');
+}
+
+module.exports = { getCategory, isVideo };
