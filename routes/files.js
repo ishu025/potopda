@@ -55,7 +55,7 @@ router.post('/upload', requireAuth, (req, res) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({
-          message: `That file is larger than the ${upload.maxSizeKb}KB upload limit. Please choose a smaller file and try again.`,
+          message: `That file is larger than the ${upload.maxRawUploadMb}MB upload limit. Please choose a smaller file and try again.`,
         });
       }
       console.error('Multer error:', err.message);
@@ -74,6 +74,15 @@ router.post('/upload', requireAuth, (req, res) => {
 
     const category = getCategory(req.file.mimetype);
 
+    // Documents can't be auto-compressed, so they're held to the target
+    // size directly. Images skip this check entirely — they're allowed in
+    // at any reasonable size and Sharp compresses them down below.
+    if (category === 'files' && req.file.size > upload.targetSizeKb * 1024) {
+      return res.status(413).json({
+        message: `Documents can't be compressed automatically, so they need to be under ${upload.targetSizeKb}KB. Please choose a smaller file or compress it yourself before uploading.`,
+      });
+    }
+
     try {
       let bufferToUpload = req.file.buffer;
       let contentType = req.file.mimetype || 'application/octet-stream';
@@ -85,7 +94,7 @@ router.post('/upload', requireAuth, (req, res) => {
         folder = 'potopda/images';
         contentType = 'image/jpeg';
         try {
-          bufferToUpload = await compressPostImage(req.file.buffer);
+          bufferToUpload = await compressPostImage(req.file.buffer, upload.targetSizeKb * 1024);
         } catch (compressErr) {
           console.error('Sharp compression error:', compressErr.message);
           return res.status(422).json({

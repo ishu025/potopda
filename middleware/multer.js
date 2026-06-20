@@ -1,18 +1,24 @@
 const multer = require('multer');
 
-// Max upload size, in KB, accepted for any single file (profile photo, post
-// image, or document). Default 500KB keeps individual uploads small before
-// they're compressed further (for images) — this is what actually protects
-// the MongoDB Atlas/free-tier limits this app runs under, since uploads now
-// flow through Cloudinary rather than being written into MongoDB at all.
-const maxSizeKb = parseInt(process.env.MAX_UPLOAD_SIZE_KB, 10) || 500;
+// The size we actually want stored files to end up at. Used as the
+// compression *target* for images (Sharp steps quality down until the
+// result fits, or hits a quality floor), and as a hard cap for documents,
+// which can't be auto-compressed.
+const targetSizeKb = parseInt(process.env.MAX_UPLOAD_SIZE_KB, 10) || 500;
+
+// The raw upload ceiling multer enforces before anything else runs. This
+// has to be generous — a normal phone photo is 2-8MB before compression —
+// so it only exists to stop genuinely oversized/abusive uploads, not
+// regular photos. Compression (not this limit) is what keeps storage small.
+const maxRawUploadMb = parseInt(process.env.MAX_RAW_UPLOAD_MB, 10) || 15;
 
 // Files are held in memory only briefly — long enough to compress (images)
 // and stream to Cloudinary — then discarded. Nothing touches local disk.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: maxSizeKb * 1024 },
+  limits: { fileSize: maxRawUploadMb * 1024 * 1024 },
 });
 
 module.exports = upload;
-module.exports.maxSizeKb = maxSizeKb;
+module.exports.targetSizeKb = targetSizeKb;
+module.exports.maxRawUploadMb = maxRawUploadMb;

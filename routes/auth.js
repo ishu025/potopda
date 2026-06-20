@@ -90,7 +90,7 @@ router.post('/avatar', requireAuth, (req, res) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({
-          message: `That photo is larger than the ${upload.maxSizeKb}KB upload limit. Please choose a smaller image.`,
+          message: `That photo is larger than the ${upload.maxRawUploadMb}MB upload limit. Please choose a smaller image.`,
         });
       }
       console.error('Multer error (avatar):', err.message);
@@ -108,7 +108,7 @@ router.post('/avatar', requireAuth, (req, res) => {
     try {
       let compressed;
       try {
-        compressed = await compressProfilePhoto(req.file.buffer);
+        compressed = await compressProfilePhoto(req.file.buffer, upload.targetSizeKb * 1024);
       } catch (compressErr) {
         console.error('Sharp compression error (avatar):', compressErr.message);
         return res.status(422).json({

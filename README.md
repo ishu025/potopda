@@ -120,16 +120,25 @@ Then open **http://localhost:5000**.
 
 ## How it works
 
-- Every upload is routed through `multer` in memory (capped at
-  `MAX_UPLOAD_SIZE_KB`, 500KB by default), and rejected immediately —
-  with a clear error message — if it's larger or if it's a video.
+- Every upload is routed through `multer` in memory. Raw uploads are capped
+  at `MAX_RAW_UPLOAD_MB` (15MB by default) — generous on purpose, since a
+  normal phone photo is several MB before compression. **Images are never
+  pre-checked against the 500KB target** — they're simply compressed down
+  to it. **Documents** (which can't be compressed) are rejected up front if
+  they're over `MAX_UPLOAD_SIZE_KB` (500KB by default), with a clear error
+  explaining why. Videos are rejected outright with a clear error message.
 - **Images** are re-compressed with Sharp before upload:
-  - **Profile photos** are resized to a 500×500 square and compressed to
-    **50% quality** — they're only ever shown as a small avatar, so the
-    extra compression isn't noticeable.
+  - **Profile photos** are resized to a 500×500 square and compressed
+    starting at **50% quality** — they're only ever shown as a small
+    avatar, so the extra compression isn't noticeable.
   - **Post images** (the "Images" tab) are resized to a max of 1600px and
-    compressed to **75% quality** — they're the actual content people are
-    viewing, so more quality is kept.
+    compressed starting at **75% quality** — they're the actual content
+    people are viewing, so more quality is kept.
+  - If the first compression pass is still over the `MAX_UPLOAD_SIZE_KB`
+    target (rare — only very busy/detailed images), quality is stepped
+    down automatically and retried until it fits or hits a floor. The
+    person uploading never sees an error for this — it's silent, the same
+    way it would feel uploading a normal photo anywhere else.
 - **Documents** (anything not an image) are uploaded to Cloudinary as-is,
   under `resource_type: raw`, with no compression applied.
 - The compressed/raw buffer is streamed straight to Cloudinary — nothing
@@ -183,7 +192,10 @@ download links, instead of proxying bytes through this server.
 
 - **Accent color / theme:** edit the CSS variables at the top of
   `public/css/styles.css` (`:root` for light, `[data-theme='dark']` for dark).
-- **Max upload size:** change `MAX_UPLOAD_SIZE_KB` in `.env`.
+- **Max upload size:** `MAX_UPLOAD_SIZE_KB` in `.env` is the compression
+  target for images and the hard cap for documents. `MAX_RAW_UPLOAD_MB` is
+  the raw ceiling before compression — raise it if you expect very large
+  source photos.
 - **Compression quality:** edit `PROFILE_PHOTO_QUALITY` / `POST_IMAGE_QUALITY`
   and the resize dimensions in `utils/imageCompress.js`.
 - **Fonts:** swap the Google Fonts `<link>` in `index.html` and the
