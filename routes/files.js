@@ -6,9 +6,12 @@ const { uploadBuffer, destroyAsset, downloadUrl } = require('../config/cloudinar
 const { compressPostImage } = require('../utils/imageCompress');
 const { getCategory, isVideo } = require('../utils/category');
 const { requireAuth } = require('../middleware/auth');
+const { emitToUser, emitToAll } = require('../sockets');
 const File = require('../models/File');
 const Reaction = require('../models/Reaction');
 const Comment = require('../models/Comment');
+const Notification = require('../models/Notification');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -139,19 +142,58 @@ router.post('/upload', requireAuth, (req, res) => {
         return res.status(500).json({ message: 'Upload was processed but saving its details failed. Please try again.' });
       }
 
+      const publicFile = formatFile(fileDoc, { likes: 0, dislikes: 0, commentCount: 0, myReaction: null, canDelete: true });
+
       res.status(201).json({
         message:
           category === 'images'
             ? `Upload complete — compressed from ${formatKb(req.file.size)} to ${formatKb(bufferToUpload.length)}.`
             : 'Upload complete.',
-        file: formatFile(fileDoc, { likes: 0, dislikes: 0, commentCount: 0, myReaction: null, canDelete: true }),
+        file: publicFile,
       });
+
+      // Notify everyone else + broadcast the new file so every open tab can
+      // drop it straight into its grid (and the bell badge) without anyone
+      // needing to refresh or re-fetch the whole list.
+      notifyOthersOfUpload(req, fileDoc).catch((err) => {
+        console.error('Could not fan out upload notifications:', err.message);
+      });
+
+      emitToAll(req.app.get('io'), 'file:new', { category, file: publicFile });
     } catch (e) {
       console.error('Unexpected upload error:', e);
       res.status(500).json({ message: 'Something went wrong while uploading. Please try again.' });
     }
   });
 });
+
+// ---------------------------------------------------------------------
+// Fans a "new_upload" notification out to every other user (the uploader
+// never gets notified about their own upload) and pushes it live over the
+// socket to anyone with that account open right now.
+// ---------------------------------------------------------------------
+async function notifyOthersOfUpload(req, fileDoc) {
+  const others = await User.find({ _id: { $ne: req.user.id } }, '_id').lean();
+  if (!others.length) return;
+
+  const noun = fileDoc.category === 'images' ? 'photo' : 'file';
+  const message = `${req.user.name} uploaded a new ${noun}: ${fileDoc.filename}`;
+  const io = req.app.get('io');
+
+  const docs = await Notification.insertMany(
+    others.map((u) => ({
+      recipient: u._id,
+      type: 'new_upload',
+      message,
+      actor: { id: req.user.id, username: req.user.username, name: req.user.name },
+      file: { id: fileDoc._id, filename: fileDoc.filename, category: fileDoc.category, url: fileDoc.url },
+    }))
+  );
+
+  docs.forEach((doc) => {
+    emitToUser(io, doc.recipient.toString(), 'notification:new', doc.toPublic());
+  });
+}
 
 // ---------------------------------------------------------------------
 // GET /api/files/:category — list metadata for images | files | all
@@ -249,6 +291,7 @@ router.delete('/files/:id', requireAuth, async (req, res) => {
     await Promise.all([doc.deleteOne(), Reaction.deleteMany({ fileId: id }), Comment.deleteMany({ fileId: id })]);
 
     res.json({ message: 'File deleted.' });
+    emitToAll(req.app.get('io'), 'file:deleted', { id: doc._id, category: doc.category });
   } catch (e) {
     console.error('Could not delete file:', e);
     res.status(500).json({ message: 'Could not delete that file. Please try again.' });

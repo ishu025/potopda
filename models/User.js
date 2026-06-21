@@ -20,6 +20,7 @@ userSchema.methods.toPublic = function toPublic() {
     name: this.name,
     role: this.role,
     avatarUrl: this.avatarUrl || null,
+    createdAt: this.createdAt,
   };
 };
 

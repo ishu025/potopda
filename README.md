@@ -3,7 +3,10 @@
 A minimal, self-hosted vault for your **images** and **files**. Binary data
 lives on **Cloudinary**, compressed on the way in with **Sharp** — MongoDB
 only ever holds lightweight metadata (filenames, URLs, users, comments,
-reactions). Light and dark themes, fully responsive, no build step.
+reactions, notifications). The frontend is a **React single-page app**
+talking to a JSON API, with **Socket.IO** pushing live notifications and
+content updates the moment they happen — no polling, no full page reloads.
+Light and dark themes, fully responsive.
 
 ## Why it's built this way
 
@@ -23,43 +26,65 @@ fixes that:
 - **Video support has been removed.** Video files are large and this app
   was never optimized to handle that volume of data on free infrastructure.
 
+On top of that storage redesign, this version also replaces the old
+server-rendered-on-every-click frontend with a proper single-page app:
+navigating between Images, Files, Profile, and Notifications never reloads
+the page — React Router swaps the view, and each view fetches only the
+data it needs from the JSON API. Reactions, comments, uploads, and deletes
+patch just the one affected item in memory instead of re-fetching whole
+lists. A Socket.IO connection rides alongside the API for anything that
+needs to show up *live* — new uploads, and the notification bell.
+
 ## Stack
 
-- **Backend:** Node.js + Express
+- **Backend:** Node.js + Express + Socket.IO
 - **File storage:** [Cloudinary](https://cloudinary.com) (images and documents)
 - **Image compression:** [Sharp](https://sharp.pixelplumbing.com), applied
   before upload
 - **Database:** MongoDB — metadata only (users, file records, comments,
-  reactions)
-- **Frontend:** Plain HTML, CSS and vanilla JavaScript — served as static
-  files by Express, no React/build tooling required
+  reactions, notifications)
+- **Frontend:** React (Vite) single-page app, talking to the JSON API and a
+  Socket.IO connection for live updates. Built once with `npm run build`
+  into `public/`, which Express then serves as static files — no separate
+  frontend host needed in production.
 
 ## Project structure
 
 ```
 potopda/
-├── server.js                  # app entry point
+├── server.js                    # app entry point — Express + http server + Socket.IO
 ├── config/
-│   ├── db.js                   # Mongo connection
-│   └── cloudinary.js           # Cloudinary config + upload/delete helpers
+│   ├── db.js                     # Mongo connection
+│   └── cloudinary.js             # Cloudinary config + upload/delete helpers
 ├── middleware/
-│   ├── multer.js                # in-memory upload handling, 500KB cap
-│   └── auth.js                  # JWT auth middleware
+│   ├── multer.js                  # in-memory upload handling, 500KB cap
+│   └── auth.js                    # JWT auth middleware
+├── sockets/
+│   └── index.js                   # Socket.IO setup, cookie-based auth, room helpers
 ├── routes/
-│   ├── files.js                 # upload / list / download / delete / reactions / comments
-│   └── auth.js                  # signup / login / logout / me / avatar
+│   ├── files.js                   # upload / list / download / delete / reactions / comments
+│   ├── auth.js                    # signup / login / logout / me / avatar / profile / password / stats
+│   └── notifications.js           # list / unread count / mark read / mark all read
 ├── models/
-│   ├── User.js                   # includes avatarUrl / avatarPublicId
-│   ├── File.js                   # metadata only — url + cloudinaryId point at the real bytes
+│   ├── User.js                     # includes avatarUrl / avatarPublicId
+│   ├── File.js                     # metadata only — url + cloudinaryId point at the real bytes
 │   ├── Comment.js
-│   └── Reaction.js
+│   ├── Reaction.js
+│   └── Notification.js             # one doc per recipient, fanned out on upload
 ├── utils/
-│   ├── category.js               # mimetype -> images | files, + video rejection
-│   └── imageCompress.js          # Sharp presets: profile photo (50%) vs post image (75%)
-├── public/                      # the entire frontend
+│   ├── category.js                 # mimetype -> images | files, + video rejection
+│   └── imageCompress.js            # Sharp presets: profile photo (50%) vs post image (75%)
+├── client/                       # React SPA source (Vite)
 │   ├── index.html
-│   ├── css/styles.css
-│   └── js/app.js
+│   ├── vite.config.js              # builds straight into ../public
+│   └── src/
+│       ├── main.jsx, App.jsx
+│       ├── context/                # Auth, Socket, Notification, Toast, AuthModal
+│       ├── hooks/                  # useFiles, useUploads, useTheme
+│       ├── components/             # TopBar, Grid, DetailModal, NotificationBell, ...
+│       ├── pages/                  # GalleryPage, ProfilePage, NotificationsPage
+│       └── styles.css
+├── public/                      # generated by `npm run build` in client/ — not hand-edited
 ├── .env.example
 ├── package.json
 └── README.md
@@ -87,7 +112,7 @@ potopda/
 
 ```bash
 # from inside the potopda/ folder
-npm install
+npm install        # also installs client/'s dependencies automatically
 cp .env.example .env
 ```
 
@@ -106,19 +131,30 @@ CLOUDINARY_API_SECRET=your-api-secret
 
 ## 3. Run it
 
+**Production-style (one server, one port):**
+
 ```bash
+npm run build   # builds the React app into public/
 npm start
-```
-
-or, for auto-restart on file changes during development:
-
-```bash
-npm run dev
 ```
 
 Then open **http://localhost:5000**.
 
-## How it works
+**Development (auto-restart + hot reload):**
+
+```bash
+npm run dev:all
+```
+
+This runs the API server (`nodemon`, auto-restarts on backend changes) and
+the Vite dev server (hot-reloads the React app instantly) side by side. The
+Vite dev server proxies `/api` and `/socket.io` to the backend, so open
+**http://localhost:5173** while developing — cookies and auth behave exactly
+like production, just with instant frontend feedback. (`npm run dev` and
+`npm run dev:client` run just the backend or just the frontend, if you'd
+rather use two terminals.)
+
+## How uploads work
 
 - Every upload is routed through `multer` in memory. Raw uploads are capped
   at `MAX_RAW_UPLOAD_MB` (15MB by default) — generous on purpose, since a
@@ -150,68 +186,111 @@ Then open **http://localhost:5000**.
   is written to local disk on the server, and nothing is written into
   MongoDB except a small metadata record afterward (filename, size,
   Cloudinary URL, Cloudinary public ID, uploader, category).
+- The moment an upload finishes, it's pushed live to every connected
+  browser tab via Socket.IO and dropped straight into the matching grid
+  (Images or Files) — no one needs to refresh to see it.
 - Deleting a file removes both the Cloudinary asset and its metadata
-  record.
+  record, and is likewise broadcast live so it disappears from everyone's
+  grid immediately.
 - Downloads redirect (302) to a Cloudinary URL that forces a download with
   the original filename — bytes are served by Cloudinary's CDN, not
   proxied through this server.
 
-## Accounts, profile photos, likes/dislikes & comments
+## Accounts & the profile page
 
-- **Sign up / log in** from the header (top right). Sessions are stored in an httpOnly cookie (JWT), valid 30 days.
-- Click your avatar in the header to upload or replace your **profile photo**.
+- **Sign up / log in** from the header (top right). Sessions are stored in
+  an httpOnly cookie (JWT), valid 30 days.
+- Click your name/avatar in the header to open your **profile page**, where
+  you can:
+  - Upload, replace, or remove your **profile photo**
+  - Edit your **display name** (kept in sync everywhere it's shown — past
+    uploads and comments update too)
+  - **Change your password** (current password required)
+  - See your **storage usage** and **uploaded post count**, broken down by
+    Images vs. Files
 - Every upload is tied to the account that uploaded it.
-- Anyone logged in can **like or dislike** any file, and **comment** on it (click a card to open the detail view).
-- **Delete rules:** a regular user can only delete their *own* uploads/comments. The fixed **admin** account can delete *anything*.
-- A built-in admin account is created automatically the first time the server starts:
+- Anyone logged in can **like or dislike** any file, and **comment** on it
+  (click a card to open the detail view).
+- **Delete rules:** a regular user can only delete their *own*
+  uploads/comments. The fixed **admin** account can delete *anything*.
+- A built-in admin account is created automatically the first time the
+  server starts:
   - username: `ishu025dec2008`
   - password: `1234567890ishu2008@dec25`
 
-| Method | Route                       | Description                          |
-|--------|------------------------------|---------------------------------------|
-| POST   | `/api/auth/signup`           | Create an account                     |
-| POST   | `/api/auth/login`             | Log in                                |
-| POST   | `/api/auth/logout`            | Log out                               |
-| GET    | `/api/auth/me`                | Current logged-in user (or null)      |
-| POST   | `/api/auth/avatar`            | Upload/replace profile photo (field: `avatar`) — 50% compression |
-| DELETE | `/api/auth/avatar`            | Remove profile photo                  |
-| POST   | `/api/files/:id/react`        | `{ type: 'like' \| 'dislike' }`       |
-| GET    | `/api/files/:id/comments`     | List comments on a file               |
-| POST   | `/api/files/:id/comments`     | `{ text }` — add a comment            |
-| DELETE | `/api/comments/:id`           | Delete own comment, or any if admin   |
+## Real-time notifications
+
+- Whenever someone uploads a new image or file, **everyone else** gets a
+  notification — the uploader doesn't get notified about their own upload.
+- The **bell icon** in the header shows an unread count and a dropdown
+  preview of recent notifications; clicking one marks it read and jumps to
+  the right tab (Images or Files).
+- The full **Notifications page** (`/notifications`) shows your complete
+  history with a "mark all as read" button and a "Load more" button for
+  paging through older ones.
+- Everything arrives over a single Socket.IO connection, authenticated the
+  same way the API is (the same httpOnly session cookie) — no polling.
 
 ## API reference
 
-| Method | Route                  | Description                                   |
-|--------|-------------------------|------------------------------------------------|
-| POST   | `/api/upload`           | Upload a file (multipart field name: `file`). Max 500KB; images compressed at 75% quality. |
-| GET    | `/api/files/:category`  | List files — `:category` is `images`, `files`, or `all` |
-| GET    | `/api/download/:id`     | Redirects to a Cloudinary URL that downloads the file as an attachment |
-| DELETE | `/api/files/:id`        | Delete a file from Cloudinary and its metadata |
+| Method | Route                          | Description                                            |
+|--------|---------------------------------|----------------------------------------------------------|
+| POST   | `/api/auth/signup`               | Create an account                                         |
+| POST   | `/api/auth/login`                 | Log in                                                     |
+| POST   | `/api/auth/logout`                | Log out                                                    |
+| GET    | `/api/auth/me`                     | Current logged-in user (or null)                           |
+| PUT    | `/api/auth/profile`                | `{ name }` — edit display name                              |
+| PUT    | `/api/auth/password`               | `{ currentPassword, newPassword }` — change password         |
+| GET    | `/api/auth/stats`                   | Storage usage + upload count for the profile page             |
+| POST   | `/api/auth/avatar`                  | Upload/replace profile photo (field: `avatar`) — 50% compression |
+| DELETE | `/api/auth/avatar`                  | Remove profile photo                                            |
+| POST   | `/api/upload`                       | Upload a file (multipart field name: `file`). Max 500KB; images compressed at 75% quality. |
+| GET    | `/api/files/:category`              | List files — `:category` is `images`, `files`, or `all`           |
+| GET    | `/api/download/:id`                 | Redirects to a Cloudinary URL that downloads the file as an attachment |
+| DELETE | `/api/files/:id`                    | Delete a file from Cloudinary and its metadata                       |
+| POST   | `/api/files/:id/react`              | `{ type: 'like' \| 'dislike' }`                                       |
+| GET    | `/api/files/:id/comments`           | List comments on a file                                               |
+| POST   | `/api/files/:id/comments`           | `{ text }` — add a comment                                            |
+| DELETE | `/api/comments/:id`                 | Delete own comment, or any if admin                                    |
+| GET    | `/api/notifications`                | Recent notifications (`?before=<id>` to page further back)              |
+| GET    | `/api/notifications/unread-count`   | Just the bell badge count                                                |
+| POST   | `/api/notifications/:id/read`       | Mark one notification as read                                            |
+| POST   | `/api/notifications/read-all`       | Mark every notification as read                                          |
 
-Image and file list responses now include a direct `url` field (the
+Image and file list responses include a direct `url` field (the
 Cloudinary `secure_url`) — the frontend uses it straight in `<img src>` and
 download links, instead of proxying bytes through this server.
+
+### Socket.IO events
+
+| Event              | Direction       | Payload                                  | When                                      |
+|---------------------|------------------|--------------------------------------------|---------------------------------------------|
+| `identify`           | client → server  | *(none)*                                    | Sent right after login/signup/logout so the socket re-reads the auth cookie without reconnecting |
+| `file:new`            | server → all     | `{ category, file }`                         | Right after any upload finishes               |
+| `file:deleted`         | server → all     | `{ id, category }`                            | Right after any file is deleted               |
+| `notification:new`      | server → one user | the notification object                        | Right after someone else uploads               |
 
 ## Customizing
 
 - **Accent color / theme:** edit the CSS variables at the top of
-  `public/css/styles.css` (`:root` for light, `[data-theme='dark']` for dark).
+  `client/src/styles.css` (`:root` for light, `[data-theme='dark']` for
+  dark), then `npm run build`.
 - **Max upload size:** `MAX_UPLOAD_SIZE_KB` in `.env` is the compression
   target for images and the hard cap for documents. `MAX_RAW_UPLOAD_MB` is
   the raw ceiling before compression — raise it if you expect very large
   source photos.
 - **Compression quality:** edit `PROFILE_PHOTO_QUALITY` / `POST_IMAGE_QUALITY`
   and the resize dimensions in `utils/imageCompress.js`.
-- **Fonts:** swap the Google Fonts `<link>` in `index.html` and the
+- **Fonts:** swap the Google Fonts `<link>` in `client/index.html` and the
   `--font-display` / `--font-body` / `--font-mono` variables in the CSS.
 
 ## Possible next steps
 
-- Folders/tags, search, or multi-user accounts with roles beyond admin/user
-- Pagination for very large libraries (currently all files in a category load at once)
+- Folders/tags, search, or roles beyond admin/user
+- Pagination for very large libraries (currently a whole category loads at once)
 - A scheduled job to reconcile orphaned Cloudinary assets if a delete ever
   partially fails
+- Push/email notifications for when no tab is open
 
 ---
 
